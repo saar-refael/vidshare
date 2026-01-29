@@ -1,95 +1,117 @@
 import socket
+import os
 
-HOST = "0.0.0.0"
-PORT = 5000
+server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server_socket.bind(('127.0.0.1', 9999))
+server_socket.listen(5)
 
-users = {"saar":"zb"}
+users = {}          # username -> password
+logged_in = {}      # socket -> username
 
-server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-server.bind((HOST, PORT))
-server.listen(1)
+print("Server running on 127.0.0.1:9999...")
 
-print("Server listening on", HOST, PORT)
+def safe_video_path(filename: str) -> str | None:
+    """
+    Returns absolute path to videos/filename if it exists and is safe.
+    Prevents path traversal like ../../secret
+    """
+    base_dir = os.path.dirname(__file__)
+    videos_dir = os.path.join(base_dir, "videos")
 
-client, addr = server.accept()
-print("Connected:", addr)
+    # normalize
+    requested = os.path.join(videos_dir, filename)
+    videos_dir_abs = os.path.abspath(videos_dir)
+    requested_abs = os.path.abspath(requested)
 
-buffer = ""
+    if not requested_abs.startswith(videos_dir_abs + os.sep) and requested_abs != videos_dir_abs:
+        return None
 
+    if not os.path.isfile(requested_abs):
+        return None
 
-logged_in = False
-current_user = None
+    return requested_abs
 
 while True:
-    data = client.recv(1024)
-    if not data:
-        print("Client disconnected")
-        break
+    client, addr = server_socket.accept()
+    print("New client:", addr)
 
-    buffer += data.decode()
-
-    while "\n" in buffer:
-        line, buffer = buffer.split("\n", 1)
-        line = line.strip()
-        if line == "":
-            continue
-
-        cmd = line.lower()
-
-
-        if cmd == "quit":
-            client.sendall("BYE\n".encode())
+    while True:
+        data = client.recv(1024)
+        if not data:
+            # disconnected
+            if client in logged_in:
+                print("Disconnected user:", logged_in[client])
+                del logged_in[client]
             client.close()
-            server.close()
-            raise SystemExit
+            break
 
+        line = data.decode().strip()
+        if not line:
+            continue
 
-        if cmd == "whoami":
-            if logged_in:
-                client.sendall(f"YOU ARE|{current_user}\n".encode())
+        # Special commands first (not in the 3-part command format)
+        if line == "quit":
+            if client in logged_in:
+                print("User quit:", logged_in[client])
+                del logged_in[client]
+            client.sendall("OK|BYE\n".encode())
+            client.close()
+            break
+
+        if line == "whoami":
+            if client in logged_in:
+                client.sendall(f"OK|YOUARE|{logged_in[client]}\n".encode())
             else:
-                client.sendall("YOU ARE|NONE\n".encode())
+                client.sendall("FAIL|NOT_LOGGED_IN\n".encode())
             continue
 
-
-        if cmd == "logout":
-            logged_in = False
-            current_user = None
-            client.sendall("OK|LOGGED_OUT\n".encode())
+        if line == "logout":
+            if client in logged_in:
+                del logged_in[client]
+                client.sendall("OK|LOGGED_OUT\n".encode())
+            else:
+                client.sendall("FAIL|NOT_LOGGED_IN\n".encode())
             continue
 
+        # NEW: watch|filename (no login required)
+        parts_watch = line.split("|")
+        if len(parts_watch) == 2 and parts_watch[0].lower() == "watch":
+            filename = parts_watch[1].strip()
+            if not filename:
+                client.sendall("FAIL|NO_FILENAME\n".encode())
+                continue
 
+            path = safe_video_path(filename)
+            if path is None:
+                client.sendall("FAIL|NO_SUCH_VIDEO\n".encode())
+            else:
+                client.sendall(f"OK|WATCH|{filename}\n".encode())
+            continue
+
+        # Standard format: command|username|password
         parts = line.split("|")
         if len(parts) != 3:
-            client.sendall("ERROR|BAD_FORMAT\n".encode())
+            client.sendall("FAIL|BAD_FORMAT\n".encode())
             continue
 
-        action, username, password = parts[0], parts[1], parts[2]
+        command, username, password = parts
 
-
-        if logged_in and action in ("login", "register"):
-            client.sendall("FAIL|ALREADY_LOGGED_IN\n".encode())
-            continue
-
-        if action == "register":
+        if command == "register":
             if username in users:
                 client.sendall("FAIL|USER_EXISTS\n".encode())
             else:
                 users[username] = password
-                logged_in = True
-                current_user = username
-                client.sendall("OK|REGISTERED_AND_LOGGED_IN\n".encode())
+                client.sendall("OK|REGISTERED\n".encode())
 
-        elif action == "login":
-            if username not in users:
-                client.sendall("FAIL|NO_SUCH_USER\n".encode())
-            elif users[username] != password:
-                client.sendall("FAIL|WRONG_PASSWORD\n".encode())
-            else:
-                logged_in = True
-                current_user = username
+        elif command == "login":
+            if username in users and users[username] == password:
+                logged_in[client] = username
                 client.sendall("OK|LOGGED_IN\n".encode())
+            else:
+                client.sendall("FAIL|INVALID\n".encode())
 
         else:
-            client.sendall("ERROR|UNKNOWN_ACTION\n".encode())
+            client.sendall("FAIL|UNKNOWN_COMMAND\n".encode())
+
+
+#different types of users , role of video uploader , and how to actually approach a video , is it more about the creator of the video or general video list.
