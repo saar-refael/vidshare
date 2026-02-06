@@ -1,21 +1,12 @@
-import socket
 import os
-import threading
+import socket
+import webbrowser
 
-def play_video_popup(filename):
-    videos_dir = os.path.join(os.path.dirname(__file__), "videos")
-    path = os.path.join(videos_dir, filename)
-
-    if not os.path.isfile(path):
-        print("CLIENT: video not found locally")
-        return
-
-    # Opens with default Windows video player
-    os.startfile(path)
-    print(f"CLIENT: playing {filename}")
+HOST = "127.0.0.1"
+PORT = 9999
 
 client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-client_socket.connect(("127.0.0.1", 9999))
+client_socket.connect((HOST, PORT))
 
 print("Connected to server.")
 print("Commands:")
@@ -24,14 +15,58 @@ print("  login|username|password")
 print("  whoami")
 print("  logout")
 print("  videos")
+print("  upload|C:\\path\\to\\video.mp4    (or ./video.mp4)")
 print("  watch|video.mp4")
 print("  quit\n")
 
-while True:
-    msg = input("> ")
-    client_socket.sendall(msg.encode() + b"\n")
+def send_line(s: str):
+    client_socket.sendall(s.encode() + b"\n")
 
-    reply = client_socket.recv(1024).decode().strip()
+def recv_line() -> str:
+    data = b""
+    while not data.endswith(b"\n"):
+        chunk = client_socket.recv(1)
+        if not chunk:
+            return ""
+        data += chunk
+    return data.decode(errors="replace").strip()
+
+while True:
+    msg = input("> ").strip()
+    if not msg:
+        continue
+
+
+    if msg.startswith("upload|"):
+        path = msg.split("|", 1)[1].strip().strip('"')
+        if not os.path.isfile(path):
+            print("CLIENT: file not found:", path)
+            continue
+
+        filename = os.path.basename(path)
+        size = os.path.getsize(path)
+
+        # tell server we want to upload
+        send_line(f"upload|{filename}|{size}")
+
+        # wait for OK|READY or failure
+        reply = recv_line()
+        print("SERVER:", reply)
+        if reply != "OK|READY":
+            continue
+
+        # send raw bytes
+        with open(path, "rb") as f:
+            client_socket.sendall(f.read())
+
+        # server confirms
+        reply2 = recv_line()
+        print("SERVER:", reply2)
+        continue
+
+
+    send_line(msg)
+    reply = recv_line()
     print("SERVER:", reply)
 
     parts = reply.split("|")
@@ -45,11 +80,9 @@ while True:
                 print(" -", v)
 
     if len(parts) >= 3 and parts[0] == "OK" and parts[1] == "WATCH":
-        threading.Thread(
-            target=play_video_popup,
-            args=(parts[2],),
-            daemon=True
-        ).start()
+        url = parts[2]
+        print("CLIENT: opening:", url)
+        webbrowser.open(url)
 
     if reply.startswith("OK|BYE"):
         break
